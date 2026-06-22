@@ -87,7 +87,7 @@ if os.path.exists(st):
     # mis-map, so drop it and force the correct top-level key (= input embeds).
     sd.pop('model.lm_head.weight', None)
     emb_key = next(k for k in sd if k.endswith('embed_tokens.weight'))
-    sd['lm_head.weight'] = sd[emb_key]
+    sd['lm_head.weight'] = sd[emb_key].clone()  # clone: avoid shared-memory save error
     save_file(sd, st, metadata={'format': 'pt'})
     print('set lm_head.weight from', emb_key,
           '| now:', [k for k in sd if 'lm_head' in k], flush=True)
