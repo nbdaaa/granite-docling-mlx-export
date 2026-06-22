@@ -92,8 +92,10 @@ if os.path.exists(st):
         sd.pop(k, None)
     sd['language_model.lm_head.weight'] = sd[emb_key].clone()  # clone: no shared mem
     save_file(sd, st, metadata={'format': 'pt'})
-    print('set language_model.lm_head.weight from', emb_key,
-          '| now:', [k for k in sd if 'lm_head' in k], flush=True)
+    _chk = list(load_file(st).keys())
+    print('OCRDEBUG file keys w/ lm_head:',
+          [k for k in _chk if 'lm_head' in k], flush=True)
+    assert 'language_model.lm_head.weight' in _chk, 'INJECT NOT PERSISTED to ' + st
 else:
     print('WARN: sharded safetensors — lm_head fix skipped', flush=True)
 
@@ -113,6 +115,8 @@ for f in os.listdir(src):
 print('merged:', sorted(os.listdir(MERGED_DIR)), flush=True)
 
 # 4. Convert HF -> MLX (no quantization).
+import mlx_vlm  # noqa: E402
+print('OCRDEBUG mlx_vlm version:', mlx_vlm.__version__, flush=True)
 assert run(f'{sys.executable} -m mlx_vlm convert '
            f'--hf-path {MERGED_DIR} --mlx-path {MLX_DIR}') == 0, 'convert failed'
 
