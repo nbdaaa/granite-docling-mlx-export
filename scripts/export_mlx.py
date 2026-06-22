@@ -82,14 +82,17 @@ if os.path.exists(st):
     print('DEBUG head/embed keys:',
           [k for k in sd if 'lm_head' in k or k.endswith('embed_tokens.weight')],
           flush=True)
-    # mlx_vlm idefics3 sanitize maps TOP-LEVEL 'lm_head.weight' ->
-    # 'language_model.lm_head.weight'. A nested 'model.lm_head.weight' would
-    # mis-map, so drop it and force the correct top-level key (= input embeds).
-    sd.pop('model.lm_head.weight', None)
     emb_key = next(k for k in sd if k.endswith('embed_tokens.weight'))
-    sd['lm_head.weight'] = sd[emb_key].clone()  # clone: avoid shared-memory save error
+    # Inject the POST-sanitize key directly. mlx_vlm's idefics3 expects the mlx
+    # param 'language_model.lm_head.weight'; this exact key passes every sanitize
+    # rule unchanged, so it matches regardless of the installed mlx_vlm version.
+    # Drop the other head variants to avoid a duplicate after sanitize.
+    for k in ('lm_head.weight', 'model.lm_head.weight',
+              'language_model.lm_head.weight'):
+        sd.pop(k, None)
+    sd['language_model.lm_head.weight'] = sd[emb_key].clone()  # clone: no shared mem
     save_file(sd, st, metadata={'format': 'pt'})
-    print('set lm_head.weight from', emb_key,
+    print('set language_model.lm_head.weight from', emb_key,
           '| now:', [k for k in sd if 'lm_head' in k], flush=True)
 else:
     print('WARN: sharded safetensors — lm_head fix skipped', flush=True)
