@@ -83,22 +83,23 @@ print('adapter:', ADAPTER_DIR, os.listdir(ADAPTER_DIR), flush=True)
 OFFICIAL_DIR = snapshot_download(OFFICIAL_MLX)
 print('official mlx files:', sorted(os.listdir(OFFICIAL_DIR)), flush=True)
 
-# 3. Merge our adapter (bf16). Untie + materialize lm_head so it lands in the
-#    state dict; granite ties lm_head to the input embeddings.
+# 3. Merge our adapter (bf16). Untie lm_head (granite ties it to the input
+#    embeddings) so it shows up as its own entry in the state dict.
 base = AutoModelForImageTextToText.from_pretrained(
     BASE_MODEL, torch_dtype=torch.bfloat16)
 model = PeftModel.from_pretrained(base, ADAPTER_DIR).merge_and_unload()
 emb = model.get_input_embeddings().weight
-model.lm_head.weight = nn.Parameter(emb.detach().clone())
-model.config.tie_word_embeddings = False
-if hasattr(model.config, 'text_config'):
-    model.config.text_config.tie_word_embeddings = False
-for m in [model, *model.modules()]:
-    if hasattr(m, '_tied_weights_keys'):
-        m._tied_weights_keys = []
-model.save_pretrained(MERGED_DIR, safe_serialization=True)
+try:
+    model.lm_head.weight = nn.Parameter(emb.detach().clone())
+except Exception as e:
+    print('lm_head untie skipped:', e, flush=True)
+model.eval()
 
-# 4. Load official + merged weights with MLX; sanitize our keys to official names.
+# 4. Convert the merged torch state_dict -> MLX arrays IN-PROCESS. We avoid
+#    save_pretrained (its safetensors writer trips on this model's shared
+#    tensors). numpy has no bf16, so route through fp32; we cast back to the
+#    official bf16 dtype per-key below (bf16 -> fp32 -> bf16 is lossless).
+import numpy as np  # noqa: E402
 import mlx.core as mx  # noqa: E402
 
 official_st = os.path.join(OFFICIAL_DIR, 'model.safetensors')
@@ -106,10 +107,11 @@ official = mx.load(official_st)
 official_keys = set(official.keys())
 print('official keys:', len(official_keys), flush=True)
 
-merged_st = os.path.join(MERGED_DIR, 'model.safetensors')
-assert os.path.exists(merged_st), 'merged is sharded — expected single safetensors'
-raw = mx.load(merged_st)
-ours = {sanitize_key(k): v for k, v in raw.items()}
+sd = model.state_dict()
+ours = {}
+for k, v in sd.items():
+    ours[sanitize_key(k)] = mx.array(v.detach().to(torch.float32).cpu().numpy())
+del sd, model, base
 if 'language_model.lm_head.weight' not in ours:  # tied fallback
     ours['language_model.lm_head.weight'] = ours['language_model.embed_tokens.weight']
 
