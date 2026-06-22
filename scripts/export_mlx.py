@@ -154,9 +154,28 @@ for f in os.listdir(src):
         shutil.copy(s, os.path.join(MERGED_DIR, f))
 print('merged:', sorted(os.listdir(MERGED_DIR)), flush=True)
 
-# 4. Convert HF -> MLX (no quantization).
-assert run(f'{sys.executable} -m mlx_vlm convert '
-           f'--hf-path {MERGED_DIR} --mlx-path {MLX_DIR}') == 0, 'convert failed'
+# 4. Convert HF -> MLX IN-PROCESS. The mlx_vlm CLI `convert` mis-handles this
+#    model's (untied) head during load_weights, but building the model + loading
+#    the sanitized weights (verified MISSING 0) + saving directly works, and the
+#    saved model has native mlx key names that load cleanly afterwards.
+import json as _json
+import mlx.core as _mx
+from mlx_vlm.models import idefics3 as _i3
+
+_cfg = _i3.ModelConfig.from_dict(
+    _json.load(open(os.path.join(MERGED_DIR, 'config.json'))))
+for _a, _cn in (('vision_config', 'VisionConfig'), ('text_config', 'TextConfig')):
+    _v = getattr(_cfg, _a, None)
+    if isinstance(_v, dict) and hasattr(_i3, _cn):
+        setattr(_cfg, _a, getattr(_i3, _cn).from_dict(_v))
+_model = _i3.Model(_cfg)
+_model.load_weights(list(_model.sanitize(_mx.load(st)).items()))
+os.makedirs(MLX_DIR, exist_ok=True)
+_model.save_weights(os.path.join(MLX_DIR, 'model.safetensors'))
+for _f in os.listdir(MERGED_DIR):
+    if _f != 'model.safetensors':
+        shutil.copy(os.path.join(MERGED_DIR, _f), os.path.join(MLX_DIR, _f))
+print('MLX saved ->', MLX_DIR, sorted(os.listdir(MLX_DIR)), flush=True)
 
 # 5. VERIFY — generate on the test page; compare the header with the serving
 #    output in the build log (ỦY BAN NHÂN DÂN / CỘNG HÒA… / Chủ tịch / signature).
