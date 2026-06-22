@@ -46,22 +46,6 @@ def run(cmd: str) -> int:
     return os.system(cmd)
 
 
-# --- TEMP DEBUG: dump the installed mlx_vlm idefics3 sanitize FIRST (runs in
-#     seconds, before any download, so it can't be cut off); also write it as an
-#     artifact. Disable later with DUMP_SANITIZE=0.
-if os.environ.get('DUMP_SANITIZE', '1') == '1':
-    import mlx_vlm
-    import mlx_vlm.models.idefics3.idefics3 as _idef
-    _src = open(_idef.__file__).read()
-    with open('idefics3_installed.py', 'w') as _f:
-        _f.write(_src)
-    _i = _src.find('def sanitize')
-    _snip = _src[_i:_i + 2000] if _i != -1 else '(no def sanitize in idefics3.py)'
-    print('OCRDEBUG mlx_vlm', mlx_vlm.__version__,
-          '\n===SAN_BEGIN===\n', _snip, '\n===SAN_END===', flush=True)
-    sys.exit(0)
-
-
 # 1. Pull the Production adapter from MLflow.
 mlflow.set_tracking_uri(os.environ['MLFLOW_TRACKING_URI'])
 client = mlflow.MlflowClient()
@@ -114,6 +98,36 @@ if os.path.exists(st):
     assert 'language_model.lm_head.weight' in _chk, 'INJECT NOT PERSISTED to ' + st
 else:
     print('WARN: sharded safetensors — lm_head fix skipped', flush=True)
+
+# --- TEMP DEBUG: instantiate the mlx model and compare its expected params
+#     against the sanitized weight keys, to see EXACTLY why lm_head is "missing".
+if os.environ.get('DUMP_DEBUG', '1') == '1':
+    import json as _json
+    import traceback as _tb
+    import mlx.core as _mx
+    from mlx.utils import tree_flatten as _tf
+    _out = []
+    try:
+        import mlx_vlm
+        _out.append('mlx_vlm ' + mlx_vlm.__version__)
+        from mlx_vlm.models.idefics3 import Model as _M, ModelConfig as _C
+        _cfg = _C.from_dict(_json.load(open(os.path.join(MERGED_DIR, 'config.json'))))
+        _model = _M(_cfg)
+        _exp = set(k for k, _ in _tf(_model.parameters()))
+        _w = _model.sanitize(_mx.load(st))
+        _wk = set(_w.keys())
+        _out.append('EXPECTED lm_head: %s' % [k for k in _exp if 'lm_head' in k])
+        _out.append('WEIGHTS  lm_head: %s' % [k for k in _wk if 'lm_head' in k])
+        _out.append('EXPECTED embed:   %s' % [k for k in _exp if 'embed_tokens' in k])
+        _out.append('WEIGHTS  embed:   %s' % [k for k in _wk if 'embed_tokens' in k])
+        _miss = sorted(_exp - _wk)
+        _out.append('MISSING (%d): %s' % (len(_miss), _miss[:25]))
+    except Exception:
+        _out.append('DBG ERROR:\n' + _tb.format_exc())
+    _txt = '\n'.join(_out)
+    open('mlx_debug.txt', 'w').write(_txt)
+    print('===DBG_BEGIN===\n' + _txt + '\n===DBG_END===', flush=True)
+    sys.exit(0)
 
 # 3. Copy tokenizer + processor config from the base (AutoProcessor.save can
 #    fail on bleeding-edge transformers; keep the merged config.json).

@@ -25,4 +25,4 @@ workflows:
           python scripts/export_mlx.py
     artifacts:
       - granite-docling-mlx/**
-      - idefics3_installed.py
+      - mlx_debug.txt
