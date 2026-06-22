@@ -1,0 +1,5 @@
+venv/
+__pycache__/
+granite-docling-merged/
+granite-docling-mlx/
+adapter_dl/

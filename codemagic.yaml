@@ -1,0 +1,27 @@
+workflows:
+  mlx-convert:
+    name: MLX convert + verify + push (granite-docling)
+    instance_type: mac_mini_m2          # Apple Silicon -> MLX runs natively on Metal
+    max_build_duration: 60
+    environment:
+      groups:
+        # Define this group in Codemagic UI (Settings -> Environment variables),
+        # mark the keys as SECRET:
+        #   VM_IP, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, HF_TOKEN
+        - ocr_mlx
+      vars:
+        HF_TARGET: nbdaaa/granite-docling-258M-mine-mlx
+        PUSH: '1'
+    scripts:
+      - name: Install Python deps (mlx-vlm)
+        script: |
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install -U pip
+          pip install -U mlx-vlm transformers peft huggingface_hub mlflow boto3 sentencepiece pillow
+      - name: Convert -> verify -> push
+        script: |
+          source venv/bin/activate
+          python scripts/export_mlx.py
+    artifacts:
+      - granite-docling-mlx/**
