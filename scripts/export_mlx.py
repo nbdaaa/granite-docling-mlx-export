@@ -101,7 +101,7 @@ else:
 
 # --- TEMP DEBUG: instantiate the mlx model and compare its expected params
 #     against the sanitized weight keys, to see EXACTLY why lm_head is "missing".
-if os.environ.get('DUMP_DEBUG', '1') == '1':
+if os.environ.get('DUMP_DEBUG', '0') == '1':
     import json as _json
     import traceback as _tb
     import mlx.core as _mx
