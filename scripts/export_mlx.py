@@ -23,6 +23,7 @@ import torch.nn as nn
 from transformers import AutoModelForImageTextToText
 from peft import PeftModel
 from huggingface_hub import snapshot_download, HfApi
+from safetensors.torch import load_file, save_file
 
 BASE_MODEL = os.environ.get('BASE_MODEL', 'ibm-granite/granite-docling-258M')
 MODEL_NAME = os.environ.get('MODEL_NAME', 'granite-docling-adapter')
@@ -57,8 +58,8 @@ assert run_id, f'No Production version for {MODEL_NAME}'
 ADAPTER_DIR = client.download_artifacts(run_id, 'adapter', 'adapter_dl')
 print('adapter:', ADAPTER_DIR, os.listdir(ADAPTER_DIR), flush=True)
 
-# 2. Merge (bf16) and UNTIE lm_head (granite-docling ties it, so it isn't saved
-#    separately and mlx_vlm.convert would report it missing).
+# 2. Merge (bf16). granite-docling ties lm_head to the input embeddings, so it
+#    is normally not stored separately and mlx_vlm.convert reports it missing.
 base = AutoModelForImageTextToText.from_pretrained(
     BASE_MODEL, torch_dtype=torch.bfloat16)
 model = PeftModel.from_pretrained(base, ADAPTER_DIR).merge_and_unload()
@@ -67,7 +68,26 @@ model.lm_head.weight = nn.Parameter(emb.detach().clone())
 model.config.tie_word_embeddings = False
 if hasattr(model.config, 'text_config'):
     model.config.text_config.tie_word_embeddings = False
+# Stop transformers from treating lm_head as a tied (droppable) weight on save.
+for m in [model, *model.modules()]:
+    if hasattr(m, '_tied_weights_keys'):
+        m._tied_weights_keys = []
 model.save_pretrained(MERGED_DIR, safe_serialization=True)
+
+# 2b. Bulletproof (version-independent): if lm_head still isn't in the
+#     safetensors, inject it = a copy of the text input embeddings.
+st = os.path.join(MERGED_DIR, 'model.safetensors')
+if os.path.exists(st):
+    sd = load_file(st)
+    if not any('lm_head' in k for k in sd):
+        emb_key = next(k for k in sd if k.endswith('embed_tokens.weight'))
+        sd['lm_head.weight'] = sd[emb_key].clone()
+        save_file(sd, st, metadata={'format': 'pt'})
+        print('injected lm_head.weight from', emb_key, flush=True)
+    else:
+        print('lm_head already present in safetensors', flush=True)
+else:
+    print('WARN: sharded safetensors — lm_head check skipped', flush=True)
 
 # 3. Copy tokenizer + processor config from the base (AutoProcessor.save can
 #    fail on bleeding-edge transformers; keep the merged config.json).
