@@ -125,8 +125,12 @@ assert not missing, 'our weights do not cover every official key'
 out = {}
 for k in official_keys:
     v = ours[k]
-    if v.shape != official[k].shape:
-        raise SystemExit(f'shape mismatch {k}: ours {v.shape} vs official {official[k].shape}')
+    if tuple(v.shape) != tuple(official[k].shape):
+        # MLX stores conv weights channels-last (O,H,W,I); torch is (O,I,H,W).
+        if v.ndim == 4 and tuple(mx.transpose(v, (0, 2, 3, 1)).shape) == tuple(official[k].shape):
+            v = mx.transpose(v, (0, 2, 3, 1))
+        else:
+            raise SystemExit(f'shape mismatch {k}: ours {v.shape} vs official {official[k].shape}')
     out[k] = v.astype(official[k].dtype)
 
 os.makedirs(MLX_DIR, exist_ok=True)
