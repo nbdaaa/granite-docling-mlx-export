@@ -79,15 +79,20 @@ model.save_pretrained(MERGED_DIR, safe_serialization=True)
 st = os.path.join(MERGED_DIR, 'model.safetensors')
 if os.path.exists(st):
     sd = load_file(st)
-    if not any('lm_head' in k for k in sd):
-        emb_key = next(k for k in sd if k.endswith('embed_tokens.weight'))
-        sd['lm_head.weight'] = sd[emb_key].clone()
-        save_file(sd, st, metadata={'format': 'pt'})
-        print('injected lm_head.weight from', emb_key, flush=True)
-    else:
-        print('lm_head already present in safetensors', flush=True)
+    print('DEBUG head/embed keys:',
+          [k for k in sd if 'lm_head' in k or k.endswith('embed_tokens.weight')],
+          flush=True)
+    # mlx_vlm idefics3 sanitize maps TOP-LEVEL 'lm_head.weight' ->
+    # 'language_model.lm_head.weight'. A nested 'model.lm_head.weight' would
+    # mis-map, so drop it and force the correct top-level key (= input embeds).
+    sd.pop('model.lm_head.weight', None)
+    emb_key = next(k for k in sd if k.endswith('embed_tokens.weight'))
+    sd['lm_head.weight'] = sd[emb_key]
+    save_file(sd, st, metadata={'format': 'pt'})
+    print('set lm_head.weight from', emb_key,
+          '| now:', [k for k in sd if 'lm_head' in k], flush=True)
 else:
-    print('WARN: sharded safetensors — lm_head check skipped', flush=True)
+    print('WARN: sharded safetensors — lm_head fix skipped', flush=True)
 
 # 3. Copy tokenizer + processor config from the base (AutoProcessor.save can
 #    fail on bleeding-edge transformers; keep the merged config.json).
