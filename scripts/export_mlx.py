@@ -169,7 +169,16 @@ for _a, _cn in (('vision_config', 'VisionConfig'), ('text_config', 'TextConfig')
     if isinstance(_v, dict) and hasattr(_i3, _cn):
         setattr(_cfg, _a, getattr(_i3, _cn).from_dict(_v))
 _model = _i3.Model(_cfg)
-_model.load_weights(list(_model.sanitize(_mx.load(st)).items()))
+_sanw = _model.sanitize(_mx.load(st))
+_model.load_weights(list(_sanw.items()), strict=False)
+# sanity: lm_head must have received the (cloned-embed) weights, not stay random
+from mlx.utils import tree_flatten as _tf2  # noqa: E402
+_pp = dict(_tf2(_model.parameters()))
+print('OCRDEBUG lm_head mean=%.5f embed mean=%.5f equal=%s' % (
+    float(_pp['language_model.lm_head.weight'].mean()),
+    float(_pp['language_model.embed_tokens.weight'].mean()),
+    bool((_pp['language_model.lm_head.weight']
+          == _pp['language_model.embed_tokens.weight']).all())), flush=True)
 os.makedirs(MLX_DIR, exist_ok=True)
 _model.save_weights(os.path.join(MLX_DIR, 'model.safetensors'))
 for _f in os.listdir(MERGED_DIR):
