@@ -1,19 +1,28 @@
 #!/usr/bin/env python3
 """
-Merge the Production LoRA adapter into granite-docling, convert to MLX, verify,
-and push to HuggingFace. Designed to run on a macOS Apple-Silicon machine
-(e.g. a Codemagic mac_mini_m2) where MLX runs natively on Metal.
+Merge the Production LoRA adapter into granite-docling and produce an MLX model
+that is structurally identical to IBM's official MLX release
+(ibm-granite/granite-docling-258M-mlx) — only the tensor VALUES are our
+fine-tuned weights. We do NOT use `mlx_vlm convert` / `load_weights` (which
+mis-handles this model's head). Instead we:
 
-Config via environment variables (set as a Codemagic env group):
-  VM_IP              GCP VM public IP (MLflow :5000 / MinIO :9000)
-  MINIO_ACCESS_KEY   MinIO access key
-  MINIO_SECRET_KEY   MinIO secret key
-  HF_TOKEN           HuggingFace write token
-  HF_TARGET          target MLX repo (default below)
-  OCR_TEST_IMAGE     image used for the verify step (default scripts/ttcp1.jpg)
-  PUSH               '1' to push to HF (default), '0' to skip
+  1. download the official MLX repo (known-good config + processor + 471 keys),
+  2. merge our adapter (bf16) and sanitize the HF keys to the official MLX names,
+  3. write a flat safetensors with EXACTLY the official key set, our values,
+  4. ship it alongside ALL of official's config/processor/tokenizer files.
+
+The result loads the same way the official model does in mlx_vlm AND mlx-swift,
+so both prior blockers (lm_head not binding, AutoProcessor "Unrecognized image
+processor") disappear.
+
+Config via environment variables (Codemagic env group):
+  VM_IP, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, HF_TOKEN
+  HF_TARGET   target MLX repo (default below)
+  OCR_TEST_IMAGE  verify image (default scripts/ttcp1.jpg)
+  PUSH        '1' to push to HF (default), '0' to skip
 """
 import os
+import re
 import sys
 import shutil
 
@@ -23,9 +32,9 @@ import torch.nn as nn
 from transformers import AutoModelForImageTextToText
 from peft import PeftModel
 from huggingface_hub import snapshot_download, HfApi
-from safetensors.torch import load_file, save_file
 
 BASE_MODEL = os.environ.get('BASE_MODEL', 'ibm-granite/granite-docling-258M')
+OFFICIAL_MLX = os.environ.get('OFFICIAL_MLX', 'ibm-granite/granite-docling-258M-mlx')
 MODEL_NAME = os.environ.get('MODEL_NAME', 'granite-docling-adapter')
 HF_TARGET = os.environ.get('HF_TARGET', 'nbdaaa/granite-docling-258M-mine-mlx')
 MERGED_DIR = 'granite-docling-merged'
@@ -46,6 +55,17 @@ def run(cmd: str) -> int:
     return os.system(cmd)
 
 
+def sanitize_key(k: str) -> str:
+    """Replicate mlx_vlm idefics3 Model.sanitize key remapping exactly."""
+    if re.match(r'^model\.', k):
+        k = k.split('.', 1)[1]
+    elif re.match(r'^lm_head\.', k):
+        k = 'language_model.' + k
+    if re.match(r'^text_model\.', k):
+        k = 'language_model.' + k.split('.', 1)[1]
+    return k
+
+
 # 1. Pull the Production adapter from MLflow.
 mlflow.set_tracking_uri(os.environ['MLFLOW_TRACKING_URI'])
 client = mlflow.MlflowClient()
@@ -58,8 +78,13 @@ assert run_id, f'No Production version for {MODEL_NAME}'
 ADAPTER_DIR = client.download_artifacts(run_id, 'adapter', 'adapter_dl')
 print('adapter:', ADAPTER_DIR, os.listdir(ADAPTER_DIR), flush=True)
 
-# 2. Merge (bf16). granite-docling ties lm_head to the input embeddings, so it
-#    is normally not stored separately and mlx_vlm.convert reports it missing.
+# 2. Download the official MLX repo — our structural template (config, processor,
+#    tokenizer, and the canonical 471-key layout that mlx_vlm/mlx-swift load).
+OFFICIAL_DIR = snapshot_download(OFFICIAL_MLX)
+print('official mlx files:', sorted(os.listdir(OFFICIAL_DIR)), flush=True)
+
+# 3. Merge our adapter (bf16). Untie + materialize lm_head so it lands in the
+#    state dict; granite ties lm_head to the input embeddings.
 base = AutoModelForImageTextToText.from_pretrained(
     BASE_MODEL, torch_dtype=torch.bfloat16)
 model = PeftModel.from_pretrained(base, ADAPTER_DIR).merge_and_unload()
@@ -68,137 +93,60 @@ model.lm_head.weight = nn.Parameter(emb.detach().clone())
 model.config.tie_word_embeddings = False
 if hasattr(model.config, 'text_config'):
     model.config.text_config.tie_word_embeddings = False
-# Stop transformers from treating lm_head as a tied (droppable) weight on save.
 for m in [model, *model.modules()]:
     if hasattr(m, '_tied_weights_keys'):
         m._tied_weights_keys = []
 model.save_pretrained(MERGED_DIR, safe_serialization=True)
 
-# 2b. Bulletproof (version-independent): if lm_head still isn't in the
-#     safetensors, inject it = a copy of the text input embeddings.
-st = os.path.join(MERGED_DIR, 'model.safetensors')
-if os.path.exists(st):
-    sd = load_file(st)
-    print('DEBUG head/embed keys:',
-          [k for k in sd if 'lm_head' in k or k.endswith('embed_tokens.weight')],
-          flush=True)
-    emb_key = next(k for k in sd if k.endswith('embed_tokens.weight'))
-    # Inject the POST-sanitize key directly. mlx_vlm's idefics3 expects the mlx
-    # param 'language_model.lm_head.weight'; this exact key passes every sanitize
-    # rule unchanged, so it matches regardless of the installed mlx_vlm version.
-    # Drop the other head variants to avoid a duplicate after sanitize.
-    for k in ('lm_head.weight', 'model.lm_head.weight',
-              'language_model.lm_head.weight'):
-        sd.pop(k, None)
-    sd['language_model.lm_head.weight'] = sd[emb_key].clone()  # clone: no shared mem
-    save_file(sd, st, metadata={'format': 'pt'})
-    _chk = list(load_file(st).keys())
-    print('OCRDEBUG file keys w/ lm_head:',
-          [k for k in _chk if 'lm_head' in k], flush=True)
-    assert 'language_model.lm_head.weight' in _chk, 'INJECT NOT PERSISTED to ' + st
-else:
-    print('WARN: sharded safetensors — lm_head fix skipped', flush=True)
+# 4. Load official + merged weights with MLX; sanitize our keys to official names.
+import mlx.core as mx  # noqa: E402
 
-# --- TEMP DEBUG: instantiate the mlx model and compare its expected params
-#     against the sanitized weight keys, to see EXACTLY why lm_head is "missing".
-if os.environ.get('DUMP_DEBUG', '0') == '1':
-    import json as _json
-    import traceback as _tb
-    import mlx.core as _mx
-    from mlx.utils import tree_flatten as _tf
-    _out = []
-    try:
-        import mlx_vlm
-        from mlx_vlm.models import idefics3 as _i3
-        _out.append('mlx_vlm ' + mlx_vlm.__version__)
-        # raw mx.load: does mlx even see the injected key?
-        _raw = _mx.load(st)
-        _out.append('mx.load lm_head: %s' % [k for k in _raw if 'lm_head' in k])
-        _cfgd = _json.load(open(os.path.join(MERGED_DIR, 'config.json')))
-        _cfg = _i3.ModelConfig.from_dict(_cfgd)
-        # build dict sub-configs into their config objects (convert does this)
-        for _a, _cn in (('vision_config', 'VisionConfig'),
-                        ('text_config', 'TextConfig')):
-            _v = getattr(_cfg, _a, None)
-            if isinstance(_v, dict) and hasattr(_i3, _cn):
-                setattr(_cfg, _a, getattr(_i3, _cn).from_dict(_v))
-        _model = _i3.Model(_cfg)
-        _exp = set(k for k, _ in _tf(_model.parameters()))
-        _w = _model.sanitize(_mx.load(st))
-        _wk = set(_w.keys())
-        _out.append('EXPECTED lm_head: %s' % [k for k in _exp if 'lm_head' in k])
-        _out.append('WEIGHTS  lm_head: %s' % [k for k in _wk if 'lm_head' in k])
-        _out.append('EXPECTED embed:   %s' % [k for k in _exp if 'embed_tokens' in k])
-        _out.append('WEIGHTS  embed:   %s' % [k for k in _wk if 'embed_tokens' in k])
-        _miss = sorted(_exp - _wk)
-        _out.append('MISSING (%d): %s' % (len(_miss), _miss[:25]))
-    except Exception:
-        _out.append('DBG ERROR:\n' + _tb.format_exc())
-    _txt = '\n'.join(_out)
-    open('mlx_debug.txt', 'w').write(_txt)
-    print('===DBG_BEGIN===\n' + _txt + '\n===DBG_END===', flush=True)
-    sys.exit(0)
+official_st = os.path.join(OFFICIAL_DIR, 'model.safetensors')
+official = mx.load(official_st)
+official_keys = set(official.keys())
+print('official keys:', len(official_keys), flush=True)
 
-# 3. Copy tokenizer + processor config from the base (AutoProcessor.save can
-#    fail on bleeding-edge transformers; keep the merged config.json).
-src = snapshot_download(
-    BASE_MODEL,
-    allow_patterns=['*.json', '*.txt', '*.model', 'tokenizer*',
-                    'preprocessor_config.json', 'processor_config.json',
-                    'chat_template*', 'merges.txt', 'vocab.json',
-                    'special_tokens_map.json', 'added_tokens.json'],
-)
-for f in os.listdir(src):
-    s = os.path.join(src, f)
-    if os.path.isfile(s) and f != 'config.json':
-        shutil.copy(s, os.path.join(MERGED_DIR, f))
-print('merged:', sorted(os.listdir(MERGED_DIR)), flush=True)
+merged_st = os.path.join(MERGED_DIR, 'model.safetensors')
+assert os.path.exists(merged_st), 'merged is sharded — expected single safetensors'
+raw = mx.load(merged_st)
+ours = {sanitize_key(k): v for k, v in raw.items()}
+if 'language_model.lm_head.weight' not in ours:  # tied fallback
+    ours['language_model.lm_head.weight'] = ours['language_model.embed_tokens.weight']
 
-# 4. Convert HF -> MLX IN-PROCESS. The mlx_vlm CLI `convert` mis-handles this
-#    model's (untied) head during load_weights, but building the model + loading
-#    the sanitized weights (verified MISSING 0) + saving directly works, and the
-#    saved model has native mlx key names that load cleanly afterwards.
-import json as _json
-import mlx.core as _mx
-from mlx_vlm.models import idefics3 as _i3
+# 5. Build output with EXACTLY the official key set + our values + official dtype.
+missing = sorted(official_keys - set(ours.keys()))
+extra = sorted(set(ours.keys()) - official_keys)
+print('MISSING from ours (%d): %s' % (len(missing), missing[:20]), flush=True)
+print('EXTRA in ours  (%d): %s' % (len(extra), extra[:20]), flush=True)
+assert not missing, 'our weights do not cover every official key'
 
-_cfg = _i3.ModelConfig.from_dict(
-    _json.load(open(os.path.join(MERGED_DIR, 'config.json'))))
-for _a, _cn in (('vision_config', 'VisionConfig'), ('text_config', 'TextConfig')):
-    _v = getattr(_cfg, _a, None)
-    if isinstance(_v, dict) and hasattr(_i3, _cn):
-        setattr(_cfg, _a, getattr(_i3, _cn).from_dict(_v))
-_model = _i3.Model(_cfg)
-_sanw = _model.sanitize(_mx.load(st))
-_model.load_weights(list(_sanw.items()), strict=False)
-# sanity: lm_head must have received the (cloned-embed) weights, not stay random
-from mlx.utils import tree_flatten as _tf2  # noqa: E402
-_pp = dict(_tf2(_model.parameters()))
-print('OCRDEBUG lm_head mean=%.5f embed mean=%.5f equal=%s' % (
-    float(_pp['language_model.lm_head.weight'].mean()),
-    float(_pp['language_model.embed_tokens.weight'].mean()),
-    bool((_pp['language_model.lm_head.weight']
-          == _pp['language_model.embed_tokens.weight']).all())), flush=True)
+out = {}
+for k in official_keys:
+    v = ours[k]
+    if v.shape != official[k].shape:
+        raise SystemExit(f'shape mismatch {k}: ours {v.shape} vs official {official[k].shape}')
+    out[k] = v.astype(official[k].dtype)
+
 os.makedirs(MLX_DIR, exist_ok=True)
-_model.save_weights(os.path.join(MLX_DIR, 'model.safetensors'))
-for _f in os.listdir(MERGED_DIR):
-    if _f != 'model.safetensors':
-        shutil.copy(os.path.join(MERGED_DIR, _f), os.path.join(MLX_DIR, _f))
+mx.save_safetensors(os.path.join(MLX_DIR, 'model.safetensors'), out)
+
+# Ship ALL official non-weight files (config, processor, tokenizer, index, …).
+for f in os.listdir(OFFICIAL_DIR):
+    s = os.path.join(OFFICIAL_DIR, f)
+    if os.path.isfile(s) and f not in ('model.safetensors', '.gitattributes', 'README.md'):
+        shutil.copy(s, os.path.join(MLX_DIR, f))
 print('MLX saved ->', MLX_DIR, sorted(os.listdir(MLX_DIR)), flush=True)
 
-# 5. VERIFY — generate on the test page; compare the header with the serving
-#    output in the build log (ỦY BAN NHÂN DÂN / CỘNG HÒA… / Chủ tịch / signature).
-print('\n================ VERIFY (compare with serving) ================',
-      flush=True)
+# 6. VERIFY — generate on the test page; compare header with serving output.
+print('\n================ VERIFY (compare with serving) ================', flush=True)
 if os.path.exists(IMG):
     run(f'{sys.executable} -m mlx_vlm generate --model {MLX_DIR} --image {IMG} '
         f'--prompt "Convert this page to docling format." '
         f'--temperature 0.0 --max-tokens 4096')
 else:
-    print(f'(skip verify — {IMG} not found; commit a test image to enable)',
-          flush=True)
+    print(f'(skip verify — {IMG} not found)', flush=True)
 
-# 6. Push the MLX folder to HuggingFace.
+# 7. Push the MLX folder to HuggingFace.
 if os.environ.get('PUSH', '1') == '1':
     api = HfApi(token=os.environ['HF_TOKEN'])
     api.create_repo(HF_TARGET, repo_type='model', exist_ok=True)
