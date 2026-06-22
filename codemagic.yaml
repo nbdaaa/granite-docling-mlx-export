@@ -18,7 +18,11 @@ workflows:
           python3 -m venv venv
           source venv/bin/activate
           pip install -U pip
-          pip install -U mlx-vlm transformers peft huggingface_hub mlflow boto3 sentencepiece pillow
+          # Pin transformers: the latest dev wheels dropped the "Idefics3ImageProcessor"
+          # registration so mlx_vlm's AutoProcessor verify step can't load the
+          # granite-docling processor. 4.57.x still resolves it.
+          pip install -U mlx-vlm peft huggingface_hub mlflow boto3 sentencepiece pillow
+          pip install "transformers==4.57.1"
       - name: Convert -> verify -> push
         script: |
           source venv/bin/activate
