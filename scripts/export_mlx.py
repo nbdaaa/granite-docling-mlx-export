@@ -116,7 +116,14 @@ print('merged:', sorted(os.listdir(MERGED_DIR)), flush=True)
 
 # 4. Convert HF -> MLX (no quantization).
 import mlx_vlm  # noqa: E402
-print('OCRDEBUG mlx_vlm version:', mlx_vlm.__version__, flush=True)
+import mlx_vlm.models.idefics3.idefics3 as _idef  # noqa: E402
+_src = open(_idef.__file__).read()
+_i = _src.find('def sanitize')
+_snip = _src[_i:_i + 1800] if _i != -1 else '(no def sanitize in idefics3.py)'
+print('OCRDEBUG mlx_vlm', mlx_vlm.__version__,
+      '\n===SAN_BEGIN===\n', _snip, '\n===SAN_END===', flush=True)
+sys.stdout.flush()
+sys.exit(0)  # TEMP: stop here to inspect the installed sanitize
 assert run(f'{sys.executable} -m mlx_vlm convert '
            f'--hf-path {MERGED_DIR} --mlx-path {MLX_DIR}') == 0, 'convert failed'
 
