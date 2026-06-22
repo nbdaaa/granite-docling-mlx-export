@@ -109,10 +109,20 @@ if os.environ.get('DUMP_DEBUG', '1') == '1':
     _out = []
     try:
         import mlx_vlm
+        from mlx_vlm.models import idefics3 as _i3
         _out.append('mlx_vlm ' + mlx_vlm.__version__)
-        from mlx_vlm.models.idefics3 import Model as _M, ModelConfig as _C
-        _cfg = _C.from_dict(_json.load(open(os.path.join(MERGED_DIR, 'config.json'))))
-        _model = _M(_cfg)
+        # raw mx.load: does mlx even see the injected key?
+        _raw = _mx.load(st)
+        _out.append('mx.load lm_head: %s' % [k for k in _raw if 'lm_head' in k])
+        _cfgd = _json.load(open(os.path.join(MERGED_DIR, 'config.json')))
+        _cfg = _i3.ModelConfig.from_dict(_cfgd)
+        # build dict sub-configs into their config objects (convert does this)
+        for _a, _cn in (('vision_config', 'VisionConfig'),
+                        ('text_config', 'TextConfig')):
+            _v = getattr(_cfg, _a, None)
+            if isinstance(_v, dict) and hasattr(_i3, _cn):
+                setattr(_cfg, _a, getattr(_i3, _cn).from_dict(_v))
+        _model = _i3.Model(_cfg)
         _exp = set(k for k, _ in _tf(_model.parameters()))
         _w = _model.sanitize(_mx.load(st))
         _wk = set(_w.keys())
