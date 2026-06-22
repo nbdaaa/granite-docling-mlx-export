@@ -46,6 +46,22 @@ def run(cmd: str) -> int:
     return os.system(cmd)
 
 
+# --- TEMP DEBUG: dump the installed mlx_vlm idefics3 sanitize FIRST (runs in
+#     seconds, before any download, so it can't be cut off); also write it as an
+#     artifact. Disable later with DUMP_SANITIZE=0.
+if os.environ.get('DUMP_SANITIZE', '1') == '1':
+    import mlx_vlm
+    import mlx_vlm.models.idefics3.idefics3 as _idef
+    _src = open(_idef.__file__).read()
+    with open('idefics3_installed.py', 'w') as _f:
+        _f.write(_src)
+    _i = _src.find('def sanitize')
+    _snip = _src[_i:_i + 2000] if _i != -1 else '(no def sanitize in idefics3.py)'
+    print('OCRDEBUG mlx_vlm', mlx_vlm.__version__,
+          '\n===SAN_BEGIN===\n', _snip, '\n===SAN_END===', flush=True)
+    sys.exit(0)
+
+
 # 1. Pull the Production adapter from MLflow.
 mlflow.set_tracking_uri(os.environ['MLFLOW_TRACKING_URI'])
 client = mlflow.MlflowClient()
@@ -115,15 +131,6 @@ for f in os.listdir(src):
 print('merged:', sorted(os.listdir(MERGED_DIR)), flush=True)
 
 # 4. Convert HF -> MLX (no quantization).
-import mlx_vlm  # noqa: E402
-import mlx_vlm.models.idefics3.idefics3 as _idef  # noqa: E402
-_src = open(_idef.__file__).read()
-_i = _src.find('def sanitize')
-_snip = _src[_i:_i + 1800] if _i != -1 else '(no def sanitize in idefics3.py)'
-print('OCRDEBUG mlx_vlm', mlx_vlm.__version__,
-      '\n===SAN_BEGIN===\n', _snip, '\n===SAN_END===', flush=True)
-sys.stdout.flush()
-sys.exit(0)  # TEMP: stop here to inspect the installed sanitize
 assert run(f'{sys.executable} -m mlx_vlm convert '
            f'--hf-path {MERGED_DIR} --mlx-path {MLX_DIR}') == 0, 'convert failed'
 
