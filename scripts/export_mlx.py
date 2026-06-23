@@ -16,7 +16,9 @@ so both prior blockers (lm_head not binding, AutoProcessor "Unrecognized image
 processor") disappear.
 
 Config via environment variables (Codemagic env group):
-  VM_IP, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, HF_TOKEN
+  HF_TOKEN    HuggingFace token (read for the adapter repo, write for the target)
+  ADAPTER_REPO  source HF repo of the LoRA adapter (default below)
+  ADAPTER_REV   adapter repo commit/revision to pin (default below)
   HF_TARGET   target MLX repo (default below)
   OCR_TEST_IMAGE  verify image (default scripts/ttcp1.jpg)
   PUSH        '1' to push to HF (default), '0' to skip
@@ -26,7 +28,6 @@ import re
 import sys
 import shutil
 
-import mlflow
 import torch
 import torch.nn as nn
 from transformers import AutoModelForImageTextToText
@@ -35,17 +36,14 @@ from huggingface_hub import snapshot_download, HfApi
 
 BASE_MODEL = os.environ.get('BASE_MODEL', 'ibm-granite/granite-docling-258M')
 OFFICIAL_MLX = os.environ.get('OFFICIAL_MLX', 'ibm-granite/granite-docling-258M-mlx')
-MODEL_NAME = os.environ.get('MODEL_NAME', 'granite-docling-adapter')
+ADAPTER_REPO = os.environ.get('ADAPTER_REPO', 'nbdaaa/docling-ocr')
+ADAPTER_REV = os.environ.get(
+    'ADAPTER_REV', '68e4d5c80258a4c2ddf07da65af4da453ae66690')
 HF_TARGET = os.environ.get('HF_TARGET', 'nbdaaa/granite-docling-258M-mine-mlx')
 MERGED_DIR = 'granite-docling-merged'
 MLX_DIR = 'granite-docling-mlx'
 IMG = os.environ.get('OCR_TEST_IMAGE', 'scripts/ttcp1.jpg')
 
-VM = os.environ['VM_IP']
-os.environ['MLFLOW_TRACKING_URI'] = f'http://{VM}:5000'
-os.environ['MLFLOW_S3_ENDPOINT_URL'] = f'http://{VM}:9000'
-os.environ['AWS_ACCESS_KEY_ID'] = os.environ['MINIO_ACCESS_KEY']
-os.environ['AWS_SECRET_ACCESS_KEY'] = os.environ['MINIO_SECRET_KEY']
 os.environ['USE_TF'] = '0'
 os.environ['USE_FLAX'] = '0'
 
@@ -66,17 +64,18 @@ def sanitize_key(k: str) -> str:
     return k
 
 
-# 1. Pull the Production adapter from MLflow.
-mlflow.set_tracking_uri(os.environ['MLFLOW_TRACKING_URI'])
-client = mlflow.MlflowClient()
-run_id = next(
-    (v.run_id for v in client.search_model_versions(f"name='{MODEL_NAME}'")
-     if v.current_stage == 'Production'),
-    None,
-)
-assert run_id, f'No Production version for {MODEL_NAME}'
-ADAPTER_DIR = client.download_artifacts(run_id, 'adapter', 'adapter_dl')
-print('adapter:', ADAPTER_DIR, os.listdir(ADAPTER_DIR), flush=True)
+# 1. Download the LoRA adapter straight from the HF repo at a pinned commit.
+ADAPTER_DIR = snapshot_download(
+    ADAPTER_REPO, revision=ADAPTER_REV, token=os.environ.get('HF_TOKEN'))
+# Point ADAPTER_DIR at the folder that actually holds adapter_config.json
+# (in case the adapter lives in a subdirectory of the repo).
+if not os.path.exists(os.path.join(ADAPTER_DIR, 'adapter_config.json')):
+    for _root, _dirs, _files in os.walk(ADAPTER_DIR):
+        if 'adapter_config.json' in _files:
+            ADAPTER_DIR = _root
+            break
+print('adapter:', ADAPTER_REPO, ADAPTER_REV, '->', ADAPTER_DIR,
+      os.listdir(ADAPTER_DIR), flush=True)
 
 # 2. Download the official MLX repo — our structural template (config, processor,
 #    tokenizer, and the canonical 471-key layout that mlx_vlm/mlx-swift load).
