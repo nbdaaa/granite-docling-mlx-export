@@ -9,7 +9,9 @@ mis-handles this model's head). Instead we:
   1. download the official MLX repo (known-good config + processor + 471 keys),
   2. merge our adapter (bf16) and sanitize the HF keys to the official MLX names,
   3. write a flat safetensors with EXACTLY the official key set, our values,
-  4. ship it alongside ALL of official's config/processor/tokenizer files.
+  4. ship it alongside ALL of official's config/processor/tokenizer files,
+  5. patch the shipped config to route mlx-swift through the SmolVLM *tiling*
+     processor (model_type=smolvlm) so the on-device app tiles like serving.
 
 The result loads the same way the official model does in mlx_vlm AND mlx-swift,
 so both prior blockers (lm_head not binding, AutoProcessor "Unrecognized image
@@ -151,6 +153,29 @@ if os.path.exists(IMG):
         f'--temperature 0.0 --max-tokens 4096')
 else:
     print(f'(skip verify — {IMG} not found)', flush=True)
+
+# 6b. Patch the shipped config so mlx-swift routes through the SmolVLM *tiling*
+#     processor. In mlx-swift-lm, SmolVLM2 == Idefics3 (same model/config); only
+#     the processor differs — and granite's Idefics3Processor there has no tiling
+#     and a broken image-token merge (crashes). model_type=smolvlm picks
+#     SmolVLMProcessor (real tiling, correct token handling). Also cap
+#     size.longest_edge to bound on-device prefill memory. The model VALUES /
+#     471-key layout are untouched, so this only changes routing metadata.
+import json as _json2  # noqa: E402
+_cfgp = os.path.join(MLX_DIR, 'config.json')
+_cfg = _json2.load(open(_cfgp))
+_cfg['model_type'] = 'smolvlm'
+_json2.dump(_cfg, open(_cfgp, 'w'), indent=2)
+
+_ppp = os.path.join(MLX_DIR, 'preprocessor_config.json')
+_pp = _json2.load(open(_ppp))
+_pp['processor_class'] = 'SmolVLMProcessor'
+_pp['video_sampling'] = {'fps': 1, 'max_frames': 64}  # required by SmolVLMProcessorConfiguration
+_pp['image_seq_len'] = 64
+if isinstance(_pp.get('size'), dict):
+    _pp['size']['longest_edge'] = 1536
+_json2.dump(_pp, open(_ppp, 'w'), indent=2)
+print('patched config -> smolvlm / SmolVLMProcessor / size', _pp.get('size'), flush=True)
 
 # 7. Push the MLX folder to HuggingFace.
 if os.environ.get('PUSH', '1') == '1':
