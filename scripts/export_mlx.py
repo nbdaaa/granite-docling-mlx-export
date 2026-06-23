@@ -40,7 +40,7 @@ BASE_MODEL = os.environ.get('BASE_MODEL', 'ibm-granite/granite-docling-258M')
 OFFICIAL_MLX = os.environ.get('OFFICIAL_MLX', 'ibm-granite/granite-docling-258M-mlx')
 ADAPTER_REPO = os.environ.get('ADAPTER_REPO', 'nbdaaa/docling-ocr')
 ADAPTER_REV = os.environ.get(
-    'ADAPTER_REV', '68e4d5c80258a4c2ddf07da65af4da453ae66690')
+    'ADAPTER_REV', '4240d1001351c1fc45e9f60b7f85256cfba44dd3')
 HF_TARGET = os.environ.get('HF_TARGET', 'nbdaaa/granite-docling-258M-mine-mlx')
 MERGED_DIR = 'granite-docling-merged'
 MLX_DIR = 'granite-docling-mlx'
